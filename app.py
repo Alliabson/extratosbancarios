@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 import matplotlib.pyplot as plt
 import seaborn as sns
 import io
+import unicodedata
 
 # --- FUNÇÕES DE LÓGICA DE ANÁLISE (Otimizadas para Streamlit) ---
 
@@ -80,11 +81,15 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
 
 def detect_bank_and_parse(text: str, filename: str) -> List[Dict[str, Any]]:
     """Detecta o banco e chama a função de parsing apropriada."""
-    lower_text = text.lower()
-    if 'itaú uniclass' in lower_text:
-        st.info(f"Arquivo '{filename}' identificado como: Itaú Uniclass")
-        return parse_itau(text)
-    elif 'banco inter' in lower_text:
+    # Normaliza o texto para remover acentos e facilitar a detecção
+    nfkd_form = unicodedata.normalize('NFKD', text.lower())
+    normalized_text = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+    
+    # Condições de detecção mais robustas
+    if 'itau uniclass' in normalized_text or 'itau' in normalized_text:
+        st.info(f"Arquivo '{filename}' identificado como: Itaú")
+        return parse_itau(text) # O parser ainda usa o texto original
+    elif 'banco inter' in normalized_text:
         st.info(f"Arquivo '{filename}' identificado como: Banco Inter")
         return parse_inter(text)
     else:
@@ -131,7 +136,11 @@ with st.sidebar:
 
 # --- Lógica Principal da Aplicação ---
 if uploaded_files:
-    if 'df_original' not in st.session_state or st.session_state.uploaded_files != [f.name for f in uploaded_files]:
+    # Usamos os nomes dos arquivos como chave para detectar novas submissões
+    current_filenames = [f.name for f in uploaded_files]
+    
+    # Se 'df_original' não existe ou os arquivos mudaram, processa novamente
+    if 'df_original' not in st.session_state or st.session_state.get('processed_files') != current_filenames:
         with st.spinner("Processando arquivos... Isso pode levar alguns segundos."):
             all_transactions = []
             for uploaded_file in uploaded_files:
@@ -147,7 +156,7 @@ if uploaded_files:
             df = pd.DataFrame(all_transactions)
             df['category'] = df['description'].apply(categorize_transaction)
             st.session_state.df_original = df
-            st.session_state.uploaded_files = [f.name for f in uploaded_files]
+            st.session_state.processed_files = current_filenames
 
     # Aplica o filtro se houver um termo
     df_display = st.session_state.df_original
@@ -207,3 +216,4 @@ if uploaded_files:
 
 else:
     st.info("Aguardando o upload de arquivos PDF para iniciar a análise.")
+
