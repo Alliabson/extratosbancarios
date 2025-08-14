@@ -96,13 +96,12 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
     
     try:
         genai.configure(api_key=api_key)
-        # FIX: Atualizado o nome do modelo para a versão mais recente e recomendada.
         model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = f"""
         Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
         O texto a seguir é o conteúdo de um extrato em PDF. Identifique cada transação e retorne uma lista de objetos JSON.
-        Cada objeto deve ter EXATAMENTE as seguintes chaves: "date" (no formato "DD/MM/AAAA"), "description" (a descrição completa) e "amount" (o valor como um número, usando ponto como separador decimal, e negativo para saídas).
+        Cada objeto deve ter EXATAMENTE as seguintes chaves: "date" (no formato "DD/MM/AAAA"), "description" (a descrição completa, com aspas duplas escapadas com \\ se necessário) e "amount" (o valor como um número, usando ponto como separador decimal, e negativo para saídas).
         Ignore linhas de saldo, cabeçalhos ou qualquer outra informação que não seja uma transação.
 
         Texto do extrato:
@@ -110,7 +109,7 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         {text}
         ---
 
-        Retorne APENAS a lista de objetos JSON. Exemplo de saída:
+        Retorne APENAS a lista de objetos JSON, sem formatação markdown ou texto adicional. Exemplo de saída:
         [
           {{"date": "30/06/2025", "description": "PIX TRANSF BRUNO C28/06", "amount": -1500.00}},
           {{"date": "30/06/2025", "description": "SISPAG PIX H2 ESTACIONAMENTO...", "amount": 1500.00}}
@@ -118,8 +117,12 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         """
         
         response = model.generate_content(prompt)
-        # Limpa a resposta para garantir que seja um JSON válido
-        cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
+        # FIX: Limpeza robusta da resposta para garantir que seja um JSON válido
+        cleaned_response = response.text.strip()
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
         
         transactions_json = json.loads(cleaned_response)
         
@@ -134,7 +137,7 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         return transactions
         
     except Exception as e:
-        st.error(f"Ocorreu um erro ao chamar a API do Gemini: {e}")
+        st.error(f"Ocorreu um erro ao chamar ou processar a resposta da API do Gemini: {e}")
         return []
 
 
