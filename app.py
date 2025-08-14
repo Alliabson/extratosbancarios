@@ -96,7 +96,8 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
+        # FIX: Atualizado o nome do modelo para a versão mais recente e recomendada.
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = f"""
         Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
@@ -159,7 +160,7 @@ def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dic
         st.sidebar.warning("Parser padrão falhou. Usando análise com Gemini AI...")
         with st.spinner("A IA do Gemini está analisando o extrato..."):
             transactions = parse_with_gemini(text, gemini_key)
-    elif not parser:
+    elif not parser and gemini_key:
         st.sidebar.warning(f"Banco não reconhecido para '{filename}'. Tentando com Gemini AI...")
         with st.spinner("A IA do Gemini está analisando o extrato..."):
             transactions = parse_with_gemini(text, gemini_key)
@@ -299,12 +300,8 @@ if uploaded_files:
     
     # Botão para desconsiderar transações selecionadas
     if st.button("Desconsiderar Transação(ões) Selecionada(s)"):
-        # A seleção é acessada de forma diferente no novo data_editor
-        # Infelizmente, o data_editor não tem um callback direto para seleção de linhas.
-        # A abordagem mais simples é usar um widget separado para obter os índices.
         st.warning("A seleção de linhas para exclusão direta no `st.data_editor` ainda não é suportada de forma ideal. Use o filtro por nome na barra lateral por enquanto.")
 
 
 else:
     st.info("Aguardando o upload de arquivos PDF para iniciar a análise.")
-
