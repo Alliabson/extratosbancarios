@@ -3,3 +3,4 @@ pandas
 PyMuPDF
 matplotlib
 seaborn
+google-generativeai
