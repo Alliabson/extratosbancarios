@@ -308,3 +308,4 @@ if uploaded_files:
 
 else:
     st.info("Aguardando o upload de arquivos PDF para iniciar a análise.")
+
