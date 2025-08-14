@@ -5,8 +5,10 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any
 import unicodedata
+import json
+import google.generativeai as genai
 
-# --- FUNÇÕES DE LÓGICA DE ANÁLISE (Otimizadas para Streamlit) ---
+# --- FUNÇÕES DE LÓGICA DE ANÁLISE ---
 
 @st.cache_data
 def extract_text_from_pdf(file_content: bytes) -> str:
@@ -15,7 +17,6 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     try:
         with fitz.open(stream=file_content, filetype="pdf") as doc:
             for page in doc:
-                # Usar get_text() sem argumentos preserva melhor as quebras de linha.
                 full_text += page.get_text()
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
@@ -25,7 +26,7 @@ def parse_amount(amount_str: str) -> float:
     """Converte uma string de valor monetário para float."""
     if not isinstance(amount_str, str):
         return 0.0
-    cleaned_str = amount_str.replace('R$', '').strip()
+    cleaned_str = str(amount_str).replace('R$', '').strip()
     cleaned_str = cleaned_str.replace('.', '').replace(',', '.')
     try:
         return float(cleaned_str)
@@ -35,7 +36,6 @@ def parse_amount(amount_str: str) -> float:
 def parse_itau(text: str) -> List[Dict[str, Any]]:
     """Parser robusto para extratos do Itaú que analisa linha por linha."""
     transactions = []
-    # Regex para encontrar data no início e valor no final da linha
     date_regex = re.compile(r'^(\d{2}\/\d{2}\/\d{4})')
     amount_regex = re.compile(r'(-?[\d\.]*,\d{2})$')
 
@@ -44,11 +44,9 @@ def parse_itau(text: str) -> List[Dict[str, Any]]:
         date_match = date_regex.search(line)
         amount_match = amount_regex.search(line)
 
-        # A linha é considerada uma transação se tiver uma data no início e um valor no final
         if date_match and amount_match:
             date_str = date_match.group(1)
             amount_str = amount_match.group(1)
-            
             start_index = date_match.end()
             end_index = amount_match.start()
             description = line[start_index:end_index].strip()
@@ -90,20 +88,83 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
                 transactions.append({"date": current_date, "description": description.strip(), "amount": parse_amount(amount_str)})
     return transactions
 
-def detect_bank_and_parse(text: str, filename: str) -> List[Dict[str, Any]]:
-    """Detecta o banco e chama a função de parsing apropriada."""
+def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
+    """Usa a API do Gemini para extrair transações de um texto de extrato."""
+    if not api_key:
+        st.error("A chave de API do Gemini não foi fornecida.")
+        return []
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-pro')
+        
+        prompt = f"""
+        Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
+        O texto a seguir é o conteúdo de um extrato em PDF. Identifique cada transação e retorne uma lista de objetos JSON.
+        Cada objeto deve ter EXATAMENTE as seguintes chaves: "date" (no formato "DD/MM/AAAA"), "description" (a descrição completa) e "amount" (o valor como um número, usando ponto como separador decimal, e negativo para saídas).
+        Ignore linhas de saldo, cabeçalhos ou qualquer outra informação que não seja uma transação.
+
+        Texto do extrato:
+        ---
+        {text}
+        ---
+
+        Retorne APENAS a lista de objetos JSON. Exemplo de saída:
+        [
+          {{"date": "30/06/2025", "description": "PIX TRANSF BRUNO C28/06", "amount": -1500.00}},
+          {{"date": "30/06/2025", "description": "SISPAG PIX H2 ESTACIONAMENTO...", "amount": 1500.00}}
+        ]
+        """
+        
+        response = model.generate_content(prompt)
+        # Limpa a resposta para garantir que seja um JSON válido
+        cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
+        
+        transactions_json = json.loads(cleaned_response)
+        
+        # Converte os dados para o formato correto
+        transactions = []
+        for t in transactions_json:
+            transactions.append({
+                "date": pd.to_datetime(t['date'], format='%d/%m/%Y'),
+                "description": t['description'],
+                "amount": float(t['amount'])
+            })
+        return transactions
+        
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao chamar a API do Gemini: {e}")
+        return []
+
+
+def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dict[str, Any]]:
+    """Detecta o banco, tenta o parser normal e usa Gemini como fallback."""
     nfkd_form = unicodedata.normalize('NFKD', text.lower())
     normalized_text = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
     
+    parser = None
     if 'itau uniclass' in normalized_text or 'itau' in normalized_text:
         st.sidebar.info(f"Arquivo '{filename}' identificado como: Itaú")
-        return parse_itau(text)
+        parser = parse_itau
     elif 'banco inter' in normalized_text:
         st.sidebar.info(f"Arquivo '{filename}' identificado como: Banco Inter")
-        return parse_inter(text)
-    else:
-        st.sidebar.warning(f"Banco não reconhecido para o arquivo '{filename}'.")
-        return []
+        parser = parse_inter
+    
+    transactions = []
+    if parser:
+        transactions = parser(text)
+
+    # Se o parser padrão falhou ou extraiu poucas transações, usa Gemini
+    if len(transactions) < 5 and gemini_key:
+        st.sidebar.warning("Parser padrão falhou. Usando análise com Gemini AI...")
+        with st.spinner("A IA do Gemini está analisando o extrato..."):
+            transactions = parse_with_gemini(text, gemini_key)
+    elif not parser:
+        st.sidebar.warning(f"Banco não reconhecido para '{filename}'. Tentando com Gemini AI...")
+        with st.spinner("A IA do Gemini está analisando o extrato..."):
+            transactions = parse_with_gemini(text, gemini_key)
+
+    return transactions
 
 def categorize_transaction(description: str) -> str:
     """Categoriza uma transação com base em palavras-chave na descrição."""
@@ -126,18 +187,18 @@ def categorize_transaction(description: str) -> str:
 
 st.set_page_config(layout="wide", page_title="Analisador de Extratos Bancários")
 
-st.title("📊 Analisador de Extratos Bancários")
-st.write("Faça o upload dos seus extratos em formato PDF para uma análise financeira detalhada.")
+st.title("📊 Analisador de Extratos Bancários com IA")
+st.write("Faça o upload dos seus extratos em PDF. A análise será feita por regras e, se necessário, pela IA do Gemini.")
 
-# Inicializa o estado da sessão para exclusões e seleções
+# Inicializa o estado da sessão
 if 'excluded_ids' not in st.session_state:
     st.session_state.excluded_ids = set()
-if 'selection' not in st.session_state:
-    st.session_state.selection = {'rows': []}
 
 # --- Sidebar para Controles ---
 with st.sidebar:
     st.header("Controles")
+    gemini_api_key = st.text_input("Chave de API do Google Gemini", type="password", help="Sua chave é necessária para a análise com IA.")
+    
     uploaded_files = st.file_uploader(
         "Selecione os arquivos PDF",
         type="pdf",
@@ -146,7 +207,7 @@ with st.sidebar:
     
     filter_term = st.text_input(
         "Desconsiderar Titular (por nome):",
-        help="Digite um nome (ex: Herbert) para remover transações internas da análise."
+        help="Digite um nome para remover transações internas da análise."
     )
 
 # --- Lógica Principal da Aplicação ---
@@ -154,16 +215,16 @@ if uploaded_files:
     current_filenames = [f.name for f in uploaded_files]
     
     if 'df_original' not in st.session_state or st.session_state.get('processed_files') != current_filenames:
-        with st.spinner("Processando arquivos... Isso pode levar alguns segundos."):
+        with st.spinner("Processando arquivos..."):
             all_transactions = []
             for uploaded_file in uploaded_files:
                 file_content = uploaded_file.getvalue()
                 text = extract_text_from_pdf(file_content)
-                transactions = detect_bank_and_parse(text, uploaded_file.name)
+                transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
                 all_transactions.extend(transactions)
 
             if not all_transactions:
-                st.error("Nenhuma transação pôde ser extraída. Verifique se os PDFs são extratos bancários válidos.")
+                st.error("Nenhuma transação pôde ser extraída. Verifique os PDFs ou sua chave de API do Gemini.")
                 st.stop()
 
             df = pd.DataFrame(all_transactions)
@@ -212,8 +273,8 @@ if uploaded_files:
             'Saldo': x['amount'].sum()
         })).reset_index()
         
-        for col in ['Entradas', 'Saídas', 'Saldo']:
-            monthly_summary[col] = monthly_summary[col].map("R$ {:,.2f}".format)
+        for col_name in ['Entradas', 'Saídas', 'Saldo']:
+            monthly_summary[col_name] = monthly_summary[col_name].map("R$ {:,.2f}".format)
         st.dataframe(monthly_summary, use_container_width=True, hide_index=True)
     else:
         st.info("Não há dados para exibir o resumo mensal.")
@@ -222,29 +283,28 @@ if uploaded_files:
 
     st.subheader("Transações Identificadas")
     
-    # Prepara o DataFrame para exibição no data_editor
     df_for_editor = df_processed.copy()
     df_for_editor['Data'] = df_for_editor['date'].dt.strftime('%d/%m/%Y')
     df_for_editor['Valor (R$)'] = df_for_editor['amount'].map("{:,.2f}".format)
     df_for_editor.rename(columns={'description': 'Descrição', 'category': 'Categoria'}, inplace=True)
     
-    # Usa um formulário para agrupar a seleção e o botão
-    with st.form("selection_form"):
-        # O st.data_editor agora é a forma recomendada para seleção
-        edited_df = st.data_editor(
-            df_for_editor[['Data', 'Descrição', 'Valor (R$)', 'Categoria']],
-            key="data_editor",
-            use_container_width=True,
-            hide_index=True,
-            num_rows="dynamic" # Permite que a altura se ajuste
-        )
-        
-        submitted = st.form_submit_button("Desconsiderar Transação(ões) Selecionada(s)")
-        if submitted and 'selection' in st.session_state.data_editor and st.session_state.data_editor['selection']['rows']:
-            selected_indices = st.session_state.data_editor['selection']['rows']
-            selected_ids = df_processed.iloc[selected_indices]['id'].tolist()
-            st.session_state.excluded_ids.update(selected_ids)
-            st.rerun()
+    # Usando o novo st.data_editor para seleção
+    selection = st.data_editor(
+        df_for_editor[['Data', 'Descrição', 'Valor (R$)', 'Categoria']],
+        key="data_editor",
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic"
+    )
+    
+    # Botão para desconsiderar transações selecionadas
+    if st.button("Desconsiderar Transação(ões) Selecionada(s)"):
+        # A seleção é acessada de forma diferente no novo data_editor
+        # Infelizmente, o data_editor não tem um callback direto para seleção de linhas.
+        # A abordagem mais simples é usar um widget separado para obter os índices.
+        st.warning("A seleção de linhas para exclusão direta no `st.data_editor` ainda não é suportada de forma ideal. Use o filtro por nome na barra lateral por enquanto.")
+
 
 else:
     st.info("Aguardando o upload de arquivos PDF para iniciar a análise.")
+
