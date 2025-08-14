@@ -3,414 +3,311 @@ import pandas as pd
 import fitz  # PyMuPDF
 import re
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import unicodedata
 import json
 import google.generativeai as genai
-from io import BytesIO
-import traceback
-
-# --- CONFIGURAÇÕES GERAIS ---
-MAX_PAGES_TO_PROCESS = 30  # Limite para evitar processamento muito longo
-MAX_TEXT_LENGTH_FOR_AI = 30000  # Limite de caracteres para envio ao Gemini
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # --- FUNÇÕES DE LÓGICA DE ANÁLISE ---
 
 @st.cache_data
-def extract_text_from_pdf(file_content: bytes, max_pages: int = MAX_PAGES_TO_PROCESS) -> str:
-    """Extrai texto de um arquivo PDF de forma robusta, com tratamento de erros."""
+def extract_text_from_pdf(file_content: bytes) -> str:
+    """Extrai texto de um arquivo PDF, preservando as quebras de linha."""
     full_text = ""
     try:
         with fitz.open(stream=file_content, filetype="pdf") as doc:
-            for page_num, page in enumerate(doc):
-                if page_num >= max_pages:
-                    st.warning(f"Documento muito grande. Processando apenas as primeiras {max_pages} páginas.")
-                    break
-                full_text += page.get_text("text") + "\n"
+            for page in doc:
+                full_text += page.get_text()
     except Exception as e:
-        st.error(f"Erro ao ler o arquivo PDF: {str(e)}")
-        st.error(traceback.format_exc())
+        st.error(f"Erro ao ler o arquivo PDF: {e}")
     return full_text
 
 def parse_amount(amount_str: str) -> float:
-    """Converte uma string de valor monetário para float de forma segura."""
+    """Converte uma string de valor monetário para float."""
     if not isinstance(amount_str, str):
         return 0.0
-    
-    # Remove caracteres não numéricos exceto , e .
-    cleaned_str = re.sub(r'[^\d,-.]', '', amount_str.replace('R$', '').strip())
-    
-    # Verifica se está no formato brasileiro (1.234,56)
-    if ',' in cleaned_str and '.' in cleaned_str:
-        if cleaned_str.find(',') > cleaned_str.find('.'):  # Formato 1,234.56 (internacional)
-            cleaned_str = cleaned_str.replace(',', '')
-        else:  # Formato brasileiro 1.234,56
-            cleaned_str = cleaned_str.replace('.', '').replace(',', '.')
-    elif ',' in cleaned_str:  # Apenas vírgula como separador decimal
-        cleaned_str = cleaned_str.replace(',', '.')
-    
+    cleaned_str = str(amount_str).replace('R$', '').strip()
+    cleaned_str = cleaned_str.replace('.', '').replace(',', '.')
     try:
         return float(cleaned_str)
     except (ValueError, TypeError):
         return 0.0
 
 def parse_itau(text: str) -> List[Dict[str, Any]]:
-    """Parser robusto para extratos do Itaú com tratamento de erros."""
+    """Parser robusto para extratos do Itaú que analisa linha por linha."""
     transactions = []
-    lines_processed = 0
-    
-    # Regex melhorada para capturar datas e valores
-    transaction_regex = re.compile(
-        r'^(\d{2}/\d{2}/\d{4})'  # Data
-        r'(.*?)'  # Descrição (não guloso)
-        r'(-?\s*\d{1,3}(?:\.?\d{3})*(?:,\d{2})?)\s*$'  # Valor
-    )
-    
+    date_regex = re.compile(r'^(\d{2}\/\d{2}\/\d{4})')
+    amount_regex = re.compile(r'(-?[\d\.]*,\d{2})$')
+
     for line in text.split('\n'):
         line = line.strip()
-        if not line:
-            continue
-            
-        match = transaction_regex.search(line)
-        if match:
-            date_str, description, amount_str = match.groups()
-            
-            # Filtra linhas de cabeçalho/saldo
-            if any(word in description.upper() for word in ['SALDO', 'LANÇAMENTOS', 'EXTRATO']):
+        date_match = date_regex.search(line)
+        amount_match = amount_regex.search(line)
+
+        if date_match and amount_match:
+            date_str = date_match.group(1)
+            amount_str = amount_match.group(1)
+            start_index = date_match.end()
+            end_index = amount_match.start()
+            description = line[start_index:end_index].strip()
+
+            if description.upper() in ['SALDO DO DIA', 'SALDO ANTERIOR', 'LANÇAMENTOS'] or not description:
                 continue
-                
-            try:
-                transactions.append({
-                    "date": pd.to_datetime(date_str, format='%d/%m/%Y', errors='coerce'),
-                    "description": description.strip(),
-                    "amount": parse_amount(amount_str)
-                })
-                lines_processed += 1
-            except Exception as e:
-                st.warning(f"Erro ao processar linha: {line}\nErro: {str(e)}")
-    
+            
+            transactions.append({
+                "date": pd.to_datetime(date_str, format='%d/%m/%Y'),
+                "description": description,
+                "amount": parse_amount(amount_str)
+            })
     return transactions
 
 def parse_inter(text: str) -> List[Dict[str, Any]]:
-    """Parser para extratos do Banco Inter com tratamento de erros."""
+    """Parser para extratos do Banco Inter."""
     transactions = []
     current_date = None
-    date_header_regex = re.compile(r'(\d{1,2}\s+de\s+[A-Za-zç]+\s+de\s+\d{4})', re.IGNORECASE)
-    
-    month_map = {
-        'janeiro': 'January', 'fevereiro': 'February', 'março': 'March', 
-        'abril': 'April', 'maio': 'May', 'junho': 'June',
-        'julho': 'July', 'agosto': 'August', 'setembro': 'September',
-        'outubro': 'October', 'novembro': 'November', 'dezembro': 'December'
-    }
-    
+    date_header_regex = re.compile(r'(\d{1,2} de [A-Za-zç]+ de \d{4})')
     for line in text.split('\n'):
         line = line.strip()
-        if not line:
-            continue
-            
-        # Verifica se é um cabeçalho de data
         date_match = date_header_regex.search(line)
         if date_match:
             date_str = date_match.group(1)
-            for pt, en in month_map.items():
-                date_str = date_str.replace(pt, en)
             try:
+                month_map = {'janeiro': 'January', 'fevereiro': 'February', 'março': 'March', 'abril': 'April', 'maio': 'May', 'junho': 'June', 'julho': 'July', 'agosto': 'August', 'setembro': 'September', 'outubro': 'October', 'novembro': 'November', 'dezembro': 'December'}
+                for pt, en in month_map.items():
+                    date_str = date_str.replace(pt, en)
                 current_date = datetime.strptime(date_str, '%d de %B de %Y')
             except ValueError:
                 continue
         elif current_date:
-            # Verifica se a linha contém um valor (R$ no final)
             parts = line.split()
-            if len(parts) > 1 and ('R$' in parts[-1] or 'RS' in parts[-1]):
+            if len(parts) > 1 and 'R$' in parts[-1]:
                 amount_str = parts[-1]
                 description = " ".join(parts[:-1])
-                
-                if any(word in description.upper() for word in ['SALDO', 'RESUMO', 'TOTAL']):
+                if "Saldo por transação" in description:
                     continue
-                    
-                try:
-                    transactions.append({
-                        "date": current_date,
-                        "description": description.strip(),
-                        "amount": parse_amount(amount_str)
-                    })
-                except Exception as e:
-                    st.warning(f"Erro ao processar linha: {line}\nErro: {str(e)}")
-    
+                transactions.append({"date": current_date, "description": description.strip(), "amount": parse_amount(amount_str)})
     return transactions
 
 def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
-    """Usa a API do Gemini para extrair transações de forma robusta."""
+    """Usa a API do Gemini para extrair transações de um texto de extrato."""
     if not api_key:
-        st.error("Chave de API do Gemini não fornecida.")
+        st.error("A chave de API do Gemini não foi fornecida.")
         return []
     
     try:
-        # Limita o tamanho do texto para evitar erros
-        text = text[:MAX_TEXT_LENGTH_FOR_AI]
-        
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        prompt = """Extraia transações bancárias do texto abaixo. Retorne APENAS um array JSON válido.
-Cada transação deve ter: date (DD/MM/AAAA), description (string) e amount (número com sinal).
-Exemplo válido:
-[
-  {"date": "01/06/2024", "description": "PIX ENVIADO", "amount": -150.00},
-  {"date": "02/06/2024", "description": "DEPOSITO", "amount": 1000.00}
-]
+        prompt = f"""
+        Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
+        O texto a seguir é o conteúdo de um extrato em PDF. Identifique cada transação e retorne uma lista de objetos JSON.
+        Cada objeto deve ter EXATAMENTE as seguintes chaves: "date" (no formato "DD/MM/AAAA"), "description" (a descrição completa, com aspas duplas escapadas com \\ se necessário) e "amount" (o valor como um número, usando ponto como separador decimal, e negativo para saídas).
+        Ignore linhas de saldo, cabeçalhos ou qualquer outra informação que não seja uma transação.
 
-Texto do extrato:
-"""
-        prompt += text[:MAX_TEXT_LENGTH_FOR_AI]  # Garante que não exceda o limite
+        Texto do extrato:
+        ---
+        {text}
+        ---
+
+        Retorne APENAS a lista de objetos JSON, sem formatação markdown ou texto adicional. Exemplo de saída:
+        [
+          {{"date": "30/06/2025", "description": "PIX TRANSF BRUNO C28/06", "amount": -1500.00}},
+          {{"date": "30/06/2025", "description": "SISPAG PIX H2 ESTACIONAMENTO...", "amount": 1500.00}}
+        ]
+        """
         
         response = model.generate_content(prompt)
-        raw_response = response.text.strip()
+        cleaned_response = response.text.strip()
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
         
-        # Limpeza robusta da resposta
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:]
-        if raw_response.endswith("```"):
-            raw_response = raw_response[:-3]
-        raw_response = raw_response.strip()
+        transactions_json = json.loads(cleaned_response)
         
-        # Verifica se parece ser um JSON válido
-        if not raw_response.startswith('[') or not raw_response.endswith(']'):
-            st.error(f"Resposta do Gemini em formato inesperado. Início: {raw_response[:100]}...")
-            return []
-            
-        # Parse do JSON com tratamento de erros
-        try:
-            transactions = json.loads(raw_response)
-        except json.JSONDecodeError as e:
-            st.error(f"Erro ao decodificar JSON: {str(e)}")
-            st.error(f"Trecho problemático: {raw_response[max(0, e.pos-50):e.pos+50]}")
-            return []
-            
-        # Validação e conversão dos dados
-        valid_transactions = []
-        for t in transactions:
-            try:
-                if not all(key in t for key in ['date', 'description', 'amount']):
-                    continue
-                    
-                valid_transactions.append({
-                    "date": pd.to_datetime(t['date'], format='%d/%m/%Y', errors='coerce'),
-                    "description": str(t['description']),
-                    "amount": float(t['amount'])
-                })
-            except Exception as e:
-                st.warning(f"Transação ignorada: {t}. Erro: {str(e)}")
-                continue
-                
-        # Remove transações com datas inválidas
-        valid_transactions = [t for t in valid_transactions if pd.notna(t['date'])]
-        
-        return valid_transactions
+        transactions = []
+        for t in transactions_json:
+            transactions.append({
+                "date": pd.to_datetime(t['date'], format='%d/%m/%Y'),
+                "description": t['description'],
+                "amount": float(t['amount'])
+            })
+        return transactions
         
     except Exception as e:
-        st.error(f"Erro na API do Gemini: {str(e)}")
-        st.error(traceback.format_exc())
+        st.error(f"Ocorreu um erro ao chamar ou processar a resposta da API do Gemini: {e}")
         return []
 
-def detect_bank_and_parse(text: str, filename: str, gemini_key: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Detecta o banco e faz o parse com fallback para Gemini."""
-    # Normaliza o texto para comparação
+
+def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dict[str, Any]]:
+    """Detecta o banco, tenta o parser normal e usa Gemini como fallback."""
     nfkd_form = unicodedata.normalize('NFKD', text.lower())
     normalized_text = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
     
-    # Tenta identificar o banco
-    bank_parsers = {
-        'itau': parse_itau,
-        'banco inter': parse_inter
-    }
+    parser = None
+    if 'itau uniclass' in normalized_text or 'itau' in normalized_text:
+        st.sidebar.info(f"Arquivo '{filename}' identificado como: Itaú")
+        parser = parse_itau
+    elif 'banco inter' in normalized_text:
+        st.sidebar.info(f"Arquivo '{filename}' identificado como: Banco Inter")
+        parser = parse_inter
     
-    selected_parser = None
-    for bank_name, parser in bank_parsers.items():
-        if bank_name in normalized_text:
-            st.sidebar.info(f"Arquivo '{filename}' identificado como: {bank_name.title()}")
-            selected_parser = parser
-            break
-    
-    # Primeira tentativa com parser específico
     transactions = []
-    if selected_parser:
-        with st.spinner(f"Processando com parser {selected_parser.__name__}..."):
-            transactions = selected_parser(text)
-    
-    # Fallback para Gemini se necessário
-    if gemini_key and (not transactions or len(transactions) < 3):
-        st.sidebar.warning("Usando análise com Gemini AI...")
-        with st.spinner("Processando com IA..."):
-            gemini_transactions = parse_with_gemini(text, gemini_key)
-            if gemini_transactions:
-                transactions = gemini_transactions
-            else:
-                st.error("Gemini não retornou transações válidas.")
-    
+    if parser:
+        transactions = parser(text)
+
+    if len(transactions) < 5 and gemini_key:
+        st.sidebar.warning("Parser padrão falhou. Usando análise com Gemini AI...")
+        with st.spinner("A IA do Gemini está analisando o extrato..."):
+            transactions = parse_with_gemini(text, gemini_key)
+    elif not parser and gemini_key:
+        st.sidebar.warning(f"Banco não reconhecido para '{filename}'. Tentando com Gemini AI...")
+        with st.spinner("A IA do Gemini está analisando o extrato..."):
+            transactions = parse_with_gemini(text, gemini_key)
+
     return transactions
 
 def categorize_transaction(description: str) -> str:
-    """Categoriza transações com palavras-chave atualizadas."""
+    """Categoriza uma transação com base em palavras-chave na descrição."""
     desc_lower = description.lower()
-    categories = {
-        'Receitas': ['pix recebido', 'depósito', 'salário', 'rendimento', 'credito'],
-        'Alimentação': ['ifood', 'restaurante', 'mercado', 'supermercado', 'padaria'],
-        'Moradia': ['aluguel', 'condomínio', 'luz', 'água', 'energia', 'internet'],
-        'Transporte': ['uber', 'taxi', 'posto', 'combustível', 'pedágio'],
-        'Compras': ['amazon', 'shopee', 'mercado livre', 'lojas', 'shopping'],
-        'Saúde': ['farmacia', 'drogaria', 'plano de saúde', 'hospital'],
-        'Lazer': ['cinema', 'netflix', 'spotify', 'parque', 'viagem'],
-        'Serviços & Taxas': ['tarifa', 'juros', 'multa', 'boleto', 'anuidade'],
-        'Investimentos': ['aplicação', 'resgate', 'tesouro', 'ações', 'fundo'],
-        'Outros': []
+    rules = {
+        'Receitas': ['pix recebido', 'sispag', 'salário', 'credito'],
+        'Alimentação': ['ifood', 'restaurante', 'mercado', 'supermercado', 'lanche'],
+        'Moradia': ['cemig', 'dmae', 'aluguel', 'condominio', 'claro', 'telefonica'],
+        'Transporte': ['uber', 'posto', 'gasolina', 'estacionamento', 'localiza'],
+        'Compras': ['lojas', 'shopping', 'mercado pag', 'havan', 'leroy'],
+        'Saúde': ['farmacia', 'drogaria', 'unimed', 'hospital'],
+        'Serviços & Taxas': ['pagamento fatura', 'juros', 'iof', 'seguro', 'boleto', 'crediario', 'int uniclass vs', 'juros limite da conta'],
     }
-    
-    for category, keywords in categories.items():
+    for category, keywords in rules.items():
         if any(keyword in desc_lower for keyword in keywords):
             return category
     return 'Outros'
 
-# --- INTERFACE STREAMLIT ---
+# --- INTERFACE DA APLICAÇÃO STREAMLIT ---
 
-def main():
-    st.set_page_config(layout="wide", page_title="Analisador de Extratos Bancários")
-    st.title("📊 Analisador de Extratos Bancários com IA")
+st.set_page_config(layout="wide", page_title="Analisador de Extratos Bancários")
+
+st.title("📊 Analisador de Extratos Bancários com IA")
+st.write("Faça o upload dos seus extratos em PDF. A análise será feita por regras e, se necessário, pela IA do Gemini.")
+
+if 'excluded_ids' not in st.session_state:
+    st.session_state.excluded_ids = set()
+
+with st.sidebar:
+    st.header("Controles")
+    gemini_api_key = st.text_input("Chave de API do Google Gemini", type="password", help="Sua chave é necessária para a análise com IA.")
     
-    # Inicialização do estado da sessão
-    if 'df_original' not in st.session_state:
-        st.session_state.df_original = pd.DataFrame()
-    if 'excluded_ids' not in st.session_state:
-        st.session_state.excluded_ids = set()
+    uploaded_files = st.file_uploader(
+        "Selecione os arquivos PDF",
+        type="pdf",
+        accept_multiple_files=True
+    )
     
-    # Sidebar
-    with st.sidebar:
-        st.header("Configurações")
-        gemini_api_key = st.text_input("Chave da API Gemini", type="password")
-        uploaded_files = st.file_uploader("Selecione os PDFs", type="pdf", accept_multiple_files=True)
-        filter_name = st.text_input("Filtrar por nome (opcional)")
-        st.info("Dicas: Para melhores resultados, use extratos em formato texto (não imagem).")
+    filter_term = st.text_input(
+        "Desconsiderar Titular (por nome):",
+        help="Digite um nome para remover transações internas da análise."
+    )
+
+if uploaded_files:
+    current_filenames = [f.name for f in uploaded_files]
     
-    # Processamento dos arquivos
-    if uploaded_files:
-        current_files = [f.name for f in uploaded_files]
+    if 'df_original' not in st.session_state or st.session_state.get('processed_files') != current_filenames:
+        with st.spinner("Processando arquivos..."):
+            all_transactions = []
+            for uploaded_file in uploaded_files:
+                file_content = uploaded_file.getvalue()
+                text = extract_text_from_pdf(file_content)
+                transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
+                all_transactions.extend(transactions)
+
+            if not all_transactions:
+                st.error("Nenhuma transação pôde ser extraída. Verifique os PDFs ou sua chave de API do Gemini.")
+                st.stop()
+
+            df = pd.DataFrame(all_transactions)
+            df['category'] = df['description'].apply(categorize_transaction)
+            df.reset_index(inplace=True)
+            df.rename(columns={'index': 'id'}, inplace=True)
+            
+            st.session_state.df_original = df
+            st.session_state.processed_files = current_filenames
+            st.session_state.excluded_ids = set()
+
+    df_processed = st.session_state.df_original.copy()
+    
+    if filter_term:
+        mask_filter = ~df_processed['description'].str.contains(filter_term, case=False, regex=False)
+        removed_by_name = df_processed[~mask_filter]
+        df_processed = df_processed[mask_filter]
+        st.sidebar.info(f"{len(removed_by_name)} transações removidas pelo filtro de nome.")
+
+    if st.session_state.excluded_ids:
+        df_processed = df_processed[~df_processed['id'].isin(st.session_state.excluded_ids)]
+
+    st.header("Análise Financeira")
+
+    total_income = df_processed[df_processed['amount'] > 0]['amount'].sum()
+    total_expenses = df_processed[df_processed['amount'] < 0]['amount'].sum()
+    months_analyzed = df_processed['date'].dt.to_period('M').nunique() if not df_processed.empty else 0
+    average_income = total_income / months_analyzed if months_analyzed > 0 else 0
+    presumed_income = average_income * 0.30
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Entradas (Total)", f"R$ {total_income:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    col2.metric("Saídas (Total)", f"R$ {abs(total_expenses):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    col3.metric("Ticket Médio / Mês", f"R$ {average_income:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    col4.metric("Capacidade 30%", f"R$ {presumed_income:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+
+    st.markdown("---")
+    
+    st.subheader("Resumo Mensal")
+    if not df_processed.empty:
+        df_processed['Mês'] = df_processed['date'].dt.strftime('%Y-%m')
+        monthly_summary = df_processed.groupby('Mês').apply(lambda x: pd.Series({
+            'Entradas': x[x['amount'] > 0]['amount'].sum(),
+            'Saídas': x[x['amount'] < 0]['amount'].sum(),
+            'Saldo': x['amount'].sum()
+        })).reset_index()
         
-        # Verifica se precisa reprocessar
-        if 'processed_files' not in st.session_state or st.session_state.processed_files != current_files:
-            with st.spinner("Processando arquivos..."):
-                all_transactions = []
-                
-                for uploaded_file in uploaded_files:
-                    try:
-                        file_content = uploaded_file.getvalue()
-                        text = extract_text_from_pdf(file_content)
-                        
-                        if not text:
-                            st.error(f"Arquivo {uploaded_file.name} não contém texto legível.")
-                            continue
-                            
-                        transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
-                        all_transactions.extend(transactions)
-                        
-                    except Exception as e:
-                        st.error(f"Erro ao processar {uploaded_file.name}: {str(e)}")
-                        continue
-                
-                if all_transactions:
-                    df = pd.DataFrame(all_transactions)
-                    df['category'] = df['description'].apply(categorize_transaction)
-                    df['id'] = range(len(df))  # ID único para cada transação
-                    
-                    # Ordena por data
-                    df = df.sort_values('date', ascending=False).reset_index(drop=True)
-                    
-                    st.session_state.df_original = df
-                    st.session_state.processed_files = current_files
-                    st.session_state.excluded_ids = set()
-                else:
-                    st.error("Nenhuma transação válida encontrada nos arquivos.")
-                    return
-        
-        # Filtros
-        df_processed = st.session_state.df_original.copy()
-        
-        if filter_name:
-            mask = ~df_processed['description'].str.contains(filter_name, case=False)
-            df_processed = df_processed[mask]
-        
-        if st.session_state.excluded_ids:
-            df_processed = df_processed[~df_processed['id'].isin(st.session_state.excluded_ids)]
-        
-        # Métricas
-        st.header("Resumo Financeiro")
-        
-        if not df_processed.empty:
-            # Cálculos
-            df_processed['amount'] = pd.to_numeric(df_processed['amount'], errors='coerce')
-            income = df_processed[df_processed['amount'] > 0]['amount'].sum()
-            expenses = df_processed[df_processed['amount'] < 0]['amount'].sum()
-            balance = income + expenses  # Soma porque expenses é negativo
-            
-            months = df_processed['date'].dt.to_period('M').nunique()
-            avg_income = income / months if months > 0 else 0
-            avg_expenses = abs(expenses) / months if months > 0 else 0
-            
-            # Exibição
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Entradas", f"R$ {income:,.2f}".replace('.', 'X').replace(',', '.').replace('X', ','))
-            col2.metric("Total Saídas", f"R$ {abs(expenses):,.2f}".replace('.', 'X').replace(',', '.').replace('X', ','))
-            col3.metric("Saldo", f"R$ {balance:,.2f}".replace('.', 'X').replace(',', '.').replace('X', ','))
-            
-            # Gráficos e análises
-            st.subheader("Análise por Categoria")
-            category_summary = df_processed[df_processed['amount'] < 0].groupby('category')['amount'].sum().sort_values()
-            st.bar_chart(abs(category_summary))
-            
-            # Transações
-            st.subheader("Transações Detalhadas")
-            
-            # Formatação para exibição
-            display_df = df_processed.copy()
-            display_df['Data'] = display_df['date'].dt.strftime('%d/%m/%Y')
-            display_df['Valor'] = display_df['amount'].apply(lambda x: f"R$ {abs(x):,.2f}" if x < 0 else f"R$ {x:,.2f}")
-            display_df['Tipo'] = display_df['amount'].apply(lambda x: "Saída" if x < 0 else "Entrada")
-            
-            # Editor de dados
-            edited_df = st.data_editor(
-                display_df[['Data', 'description', 'Valor', 'Tipo', 'category']].rename(columns={
-                    'description': 'Descrição',
-                    'category': 'Categoria'
-                }),
-                column_config={
-                    "Categoria": st.column_config.SelectboxColumn(
-                        "Categoria",
-                        options=sorted(display_df['category'].unique())
-                    )
-                },
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed"
-            )
-            
-            # Botão para atualizar categorias
-            if st.button("Salvar Categorias"):
-                # Mapeia as categorias editadas de volta para o DataFrame original
-                category_mapping = edited_df.set_index('Descrição')['Categoria'].to_dict()
-                st.session_state.df_original['category'] = st.session_state.df_original['description'].map(category_mapping)
-                st.success("Categorias atualizadas!")
-            
-            # Exportação
-            st.download_button(
-                "Exportar para Excel",
-                df_processed.to_excel(BytesIO(), index=False),
-                "transacoes.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("Nenhuma transação para exibir após os filtros aplicados.")
+        for col_name in ['Entradas', 'Saídas', 'Saldo']:
+            monthly_summary[col_name] = monthly_summary[col_name].map("R$ {:,.2f}".format)
+        st.dataframe(monthly_summary, use_container_width=True, hide_index=True)
     else:
-        st.info("Faça o upload de arquivos PDF para começar a análise.")
+        st.info("Não há dados para exibir o resumo mensal.")
 
-if __name__ == "__main__":
-    main()
+    st.markdown("---")
+
+    st.subheader("Transações Identificadas")
+    
+    df_for_editor = df_processed.copy()
+    df_for_editor['Data'] = df_for_editor['date'].dt.strftime('%d/%m/%Y')
+    df_for_editor['Valor (R$)'] = df_for_editor['amount'].map("{:,.2f}".format)
+    df_for_editor.rename(columns={'description': 'Descrição', 'category': 'Categoria'}, inplace=True)
+
+    # Usamos um formulário para agrupar a seleção e o botão
+    with st.form("selection_form"):
+        # O st.data_editor é usado para exibir e selecionar as linhas
+        edited_df = st.data_editor(
+            df_for_editor[['Data', 'Descrição', 'Valor (R$)', 'Categoria']],
+            key="data_editor",
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic"
+        )
+        
+        submitted = st.form_submit_button("Desconsiderar Transação(ões) Selecionada(s)")
+        if submitted:
+            # Acessa a seleção do data_editor através do st.session_state
+            if 'data_editor' in st.session_state and st.session_state.data_editor['selection']['rows']:
+                selected_indices = st.session_state.data_editor['selection']['rows']
+                selected_ids = df_processed.iloc[selected_indices]['id'].tolist()
+                st.session_state.excluded_ids.update(selected_ids)
+                st.rerun()
+            else:
+                st.warning("Nenhuma transação foi selecionada.")
+
+else:
+    st.info("Aguardando o upload de arquivos PDF para iniciar a análise.")
