@@ -18,7 +18,9 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     try:
         with fitz.open(stream=file_content, filetype="pdf") as doc:
             for page in doc:
-                full_text += page.get_text("text")
+                # FIX: Usar get_text() sem argumentos preserva melhor as quebras de linha,
+                # o que é crucial para a análise linha a linha.
+                full_text += page.get_text()
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
     return full_text
@@ -216,4 +218,3 @@ if uploaded_files:
 
 else:
     st.info("Aguardando o upload de arquivos PDF para iniciar a análise.")
-
