@@ -23,14 +23,27 @@ st.write("Faça o upload dos seus extratos em PDF. A análise será feita por re
 
 @st.cache_data
 def extract_text_from_pdf(file_content: bytes) -> str:
-    """Extrai texto de um arquivo PDF, preservando as quebras de linha."""
+    """Extrai texto de TODAS as páginas de um arquivo PDF, preservando as quebras de linha."""
     full_text = ""
     try:
         with fitz.open(stream=file_content, filetype="pdf") as doc:
-            for page in doc:
-                full_text += page.get_text()
+            num_pages = len(doc)
+            st.sidebar.info(f"PDF possui {num_pages} página(s)")
+            
+            for page_num, page in enumerate(doc, 1):
+                page_text = page.get_text()
+                full_text += f"\n--- PÁGINA {page_num} ---\n{page_text}"
+                
+                # Log para debug - mostra quantos caracteres foram extraídos de cada página
+                st.sidebar.debug(f"Página {page_num}: {len(page_text)} caracteres")
+                
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
+        return ""
+    
+    # Log para debug - mostra o total de caracteres extraídos
+    st.sidebar.info(f"Total de texto extraído: {len(full_text)} caracteres")
+    
     return full_text
 
 def parse_amount(amount_str: str) -> float:
@@ -62,7 +75,11 @@ def parse_amount(amount_str: str) -> float:
 def parse_itau(text: str) -> List[Dict[str, Any]]:
     """Parser robusto para extratos do Itaú que analisa linha por linha."""
     transactions = []
-    lines = text.split('\n')
+    
+    # Remove marcações de página para análise contínua
+    text_without_page_marks = re.sub(r'--- PÁGINA \d+ ---', '', text)
+    
+    lines = text_without_page_marks.split('\n')
     
     for i, line in enumerate(lines):
         line = line.strip()
@@ -77,7 +94,7 @@ def parse_itau(text: str) -> List[Dict[str, Any]]:
             amount_str = match.group(3)
             
             # Ignora linhas de saldo
-            if any(term in description.upper() for term in ['SALDO', 'LANÇAMENTOS', 'EXTRATO']):
+            if any(term in description.upper() for term in ['SALDO', 'LANÇAMENTOS', 'EXTRATO', 'SALDO ANTERIOR', 'SALDO DO DIA']):
                 continue
             
             transactions.append({
@@ -91,7 +108,11 @@ def parse_itau(text: str) -> List[Dict[str, Any]]:
 def parse_santander(text: str) -> List[Dict[str, Any]]:
     """Parser para extratos do Santander."""
     transactions = []
-    lines = text.split('\n')
+    
+    # Remove marcações de página para análise contínua
+    text_without_page_marks = re.sub(r'--- PÁGINA \d+ ---', '', text)
+    
+    lines = text_without_page_marks.split('\n')
     
     # Padrão Santander: data, descrição e valor
     date_pattern = r'^\d{2}/\d{2}/\d{4}'
@@ -113,7 +134,7 @@ def parse_santander(text: str) -> List[Dict[str, Any]]:
                     description = line[len(date_str):-len(amount_str)].strip()
                     
                     # Ignora linhas de saldo
-                    if any(term in description.upper() for term in ['SALDO', 'S A L D O', 'EXTRATO']):
+                    if any(term in description.upper() for term in ['SALDO', 'S A L D O', 'EXTRATO', 'SALDO ANTERIOR', 'SALDO DO DIA']):
                         continue
                     
                     transactions.append({
@@ -129,7 +150,11 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
     transactions = []
     current_date = None
     
-    lines = text.split('\n')
+    # Remove marcações de página para análise contínua
+    text_without_page_marks = re.sub(r'--- PÁGINA \d+ ---', '', text)
+    
+    lines = text_without_page_marks.split('\n')
+    
     for line in lines:
         line = line.strip()
         
@@ -160,7 +185,7 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
                 amount_str = amount_match.group(1)
                 description = line.replace(f"R$ {amount_str}", "").strip()
                 
-                if any(term in description.upper() for term in ['SALDO', 'EXTRATO']):
+                if any(term in description.upper() for term in ['SALDO', 'EXTRATO', 'SALDO ANTERIOR', 'SALDO DO DIA']):
                     continue
                 
                 transactions.append({
@@ -216,8 +241,11 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
+        # Remove marcações de página para análise mais limpa
+        clean_text = re.sub(r'--- PÁGINA \d+ ---', '', text)
+        
         # Limita o texto para evitar exceder o limite de tokens
-        text_sample = text[:5000] if len(text) > 5000 else text
+        text_sample = clean_text[:8000] if len(clean_text) > 8000 else clean_text
         
         prompt = f"""
         Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
