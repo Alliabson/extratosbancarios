@@ -141,7 +141,13 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         ]
         """
         
-        response = model.generate_content(prompt)
+        try:
+            # Adiciona um timeout de 60 segundos na chamada da API para evitar travamento
+            response = model.generate_content(prompt, request_options={'timeout': 60})
+        except Exception:
+            st.error("O tempo de resposta da IA do Gemini foi excedido (60 segundos). O extrato pode ser muito complexo para ser analisado.")
+            return []
+            
         cleaned_response = response.text.strip()
         
         if cleaned_response.startswith("```json"):
