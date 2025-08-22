@@ -16,10 +16,6 @@ import os
 
 # --- FUNÇÕES DE LÓGICA DE ANÁLISE ---
 
-# A biblioteca pdf2image depende do Poppler.
-# O pytesseract depende do Tesseract.
-# Ambos precisam ser instalados no servidor via packages.txt.
-
 @st.cache_data
 def extract_text_from_pdf(file_content: bytes) -> str:
     """
@@ -33,7 +29,6 @@ def extract_text_from_pdf(file_content: bytes) -> str:
             for page in doc:
                 full_text += page.get_text()
 
-        # Se o texto extraído for muito curto ou parecer ilegível, tente OCR
         if len(full_text.strip()) < 50:
             st.info("Texto nativo não encontrado. Tentando extração por OCR...")
             try:
@@ -45,7 +40,6 @@ def extract_text_from_pdf(file_content: bytes) -> str:
             except Exception as e:
                 st.error(f"Erro durante a extração por OCR: {e}")
                 return ""
-
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
         return ""
@@ -151,17 +145,10 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         response = model.generate_content(prompt)
         cleaned_response = response.text.strip()
         
-        # Remove a formatação de código markdown se o Gemini a adicionar
         if cleaned_response.startswith("```json"):
             cleaned_response = cleaned_response[7:]
         if cleaned_response.endswith("```"):
             cleaned_response = cleaned_response[:-3]
-
-        # Tenta corrigir aspas duplas não escapadas dentro das descrições para evitar erros de JSON
-        try:
-            cleaned_response = re.sub(r'(?<!\\)"', r'\\"', cleaned_response)
-        except Exception as e:
-            st.warning(f"Erro ao tentar pré-processar a string JSON: {e}")
             
         try:
             transactions_json = json.loads(cleaned_response)
@@ -238,7 +225,6 @@ st.set_page_config(layout="wide", page_title="Analisador de Extratos Bancários"
 st.title("📊 Analisador de Extratos Bancários com IA")
 st.write("Faça o upload dos seus extratos em PDF. A análise será feita por regras e, se necessário, pela IA do Gemini.")
 
-# Verifica se a chave da API do Gemini está disponível nos segredos
 if "gemini_api_key" not in st.secrets:
     st.error("A chave de API do Gemini não foi encontrada nos segredos do Streamlit. Por favor, adicione-a.")
     st.info("Acesse a página de configurações do seu app e configure o 'gemini_api_key'.")
@@ -250,7 +236,6 @@ if 'excluded_ids' not in st.session_state:
 
 with st.sidebar:
     st.header("Controles")
-    
     st.success("Chave de API do Gemini carregada com sucesso!")
     
     uploaded_files = st.file_uploader(
