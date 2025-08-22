@@ -24,7 +24,6 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     """
     full_text = ""
     try:
-        # Tenta extrair texto de forma nativa (rápido)
         with fitz.open(stream=file_content, filetype="pdf") as doc:
             for page in doc:
                 full_text += page.get_text()
@@ -186,18 +185,27 @@ def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dic
         parser = parse_inter
     
     transactions = []
+    
     if parser:
         transactions = parser(text)
 
-    if len(transactions) < 5 and gemini_key:
-        st.sidebar.warning("Parser padrão falhou. Usando análise com Gemini AI...")
+    force_gemini = False
+    for t in transactions:
+        if ('pix recebido' in t['description'].lower() or 'salario' in t['description'].lower()) and t['amount'] < 0:
+            st.sidebar.warning(f"Erro de sinal detectado no parser padrão. Forçando análise com Gemini...")
+            force_gemini = True
+            break
+
+    if (len(transactions) < 5 and gemini_key) or force_gemini:
+        if not force_gemini:
+            st.sidebar.warning("Parser padrão falhou. Usando análise com Gemini AI...")
         with st.spinner("A IA do Gemini está analisando o extrato..."):
             transactions = parse_with_gemini(text, gemini_key)
     elif not parser and gemini_key:
         st.sidebar.warning(f"Banco não reconhecido para '{filename}'. Tentando com Gemini AI...")
         with st.spinner("A IA do Gemini está analisando o extrato..."):
             transactions = parse_with_gemini(text, gemini_key)
-
+    
     return transactions
 
 
