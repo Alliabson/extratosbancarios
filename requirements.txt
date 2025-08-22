@@ -1,6 +1,8 @@
 streamlit
 pandas
 PyMuPDF
-matplotlib
-seaborn
 google-generativeai
+pdf2image  # Garanta que esta linha está aqui
+pytesseract # E esta também
+seaborn
+matplotlib
