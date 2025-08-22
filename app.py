@@ -157,7 +157,23 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         if cleaned_response.endswith("```"):
             cleaned_response = cleaned_response[:-3]
 
-        transactions_json = json.loads(cleaned_response)
+        # Tenta corrigir aspas duplas não escapadas dentro das descrições para evitar erros de JSON
+        try:
+            # Regex para encontrar aspas duplas que não estão escapadas por uma barra invertida
+            # E substitui por aspas duplas escapadas
+            # Isso é uma tentativa de consertar o JSON malformado da IA
+            cleaned_response = re.sub(r'(?<!\\)"', r'\\"', cleaned_response)
+        except Exception as e:
+            # Caso o regex falhe, avisa mas continua tentando carregar o JSON
+            st.warning(f"Erro ao tentar pré-processar a string JSON: {e}")
+            
+        try:
+            transactions_json = json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            st.error(f"Erro de JSON: {e}")
+            st.error("Ocorreu um problema ao decodificar a resposta da IA. Veja a resposta bruta abaixo.")
+            st.code(cleaned_response, language="json")
+            return []
         
         transactions = []
         for t in transactions_json:
@@ -252,7 +268,6 @@ if uploaded_files:
             all_transactions = []
             for uploaded_file in uploaded_files:
                 file_content = uploaded_file.getvalue()
-                # A função extract_text_from_pdf agora lida com PDFs nativos e escaneados
                 text = extract_text_from_pdf(file_content)
                 transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
                 all_transactions.extend(transactions)
