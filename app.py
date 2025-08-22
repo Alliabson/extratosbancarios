@@ -511,27 +511,51 @@ if uploaded_files:
         )
         df_for_editor.rename(columns={'description': 'Descrição', 'category': 'Categoria'}, inplace=True)
 
+        # Mostra o número total de transações
+        st.info(f"Total de transações identificadas: {len(df_for_editor)}")
+        
+        # Configuração para mostrar todas as linhas
+        st.markdown("**Visualização completa de todas as transações:**")
+        
+        # Exibe todas as transações em uma tabela
+        st.dataframe(
+            df_for_editor[['Data', 'Descrição', 'Valor (R$)', 'Categoria']],
+            use_container_width=True,
+            hide_index=True,
+            height=min(800, 35 * len(df_for_editor) + 38)  # Ajusta a altura automaticamente
+        )
+        
         # Usamos um formulário para agrupar a seleção e o botão
         with st.form("selection_form"):
-            # O st.data_editor é usado para exibir e selecionar as linhas
-            edited_df = st.data_editor(
-                df_for_editor[['Data', 'Descrição', 'Valor (R$)', 'Categoria']],
-                key="data_editor",
-                use_container_width=True,
-                hide_index=True,
-                num_rows="dynamic"
+            st.markdown("**Selecionar transações para desconsiderar:**")
+            
+            # Cria uma lista de opções para seleção
+            options = []
+            for idx, row in df_for_editor.iterrows():
+                option_label = f"{row['Data']} - {row['Descrição']} - {row['Valor (R$)']}"
+                options.append((row['id'], option_label))
+            
+            # Widget de multiselect para selecionar transações
+            selected_ids = st.multiselect(
+                "Selecione as transações para desconsiderar:",
+                options=[opt[1] for opt in options],
+                format_func=lambda x: x
             )
             
             submitted = st.form_submit_button("Desconsiderar Transação(ões) Selecionada(s)")
-            if submitted:
-                # Acessa a seleção do data_editor através do st.session_state
-                if 'data_editor' in st.session_state and 'selected_rows' in st.session_state.data_editor:
-                    selected_indices = st.session_state.data_editor['selected_rows']
-                    selected_ids = df_processed.iloc[selected_indices]['id'].tolist()
-                    st.session_state.excluded_ids.update(selected_ids)
-                    st.rerun()
-                else:
-                    st.warning("Nenhuma transação foi selecionada.")
+            if submitted and selected_ids:
+                # Mapeia as seleções de volta para os IDs
+                selected_option_ids = []
+                for selected in selected_ids:
+                    for opt_id, opt_label in options:
+                        if opt_label == selected:
+                            selected_option_ids.append(opt_id)
+                            break
+                
+                st.session_state.excluded_ids.update(selected_option_ids)
+                st.rerun()
+            elif submitted:
+                st.warning("Nenhuma transação foi selecionada.")
     else:
         st.info("Nenhuma transação encontrada para exibir.")
 
