@@ -9,20 +9,49 @@ import json
 import google.generativeai as genai
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pdf2image import convert_from_bytes
+import pytesseract
+import tempfile
+import os
 
 # --- FUNÇÕES DE LÓGICA DE ANÁLISE ---
 
+# Descomente e ajuste a linha abaixo se o Tesseract não for encontrado automaticamente
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe' 
+
 @st.cache_data
 def extract_text_from_pdf(file_content: bytes) -> str:
-    """Extrai texto de um arquivo PDF, preservando as quebras de linha."""
+    """
+    Extrai texto de um arquivo PDF. Tenta extração nativa e, se falhar,
+    recorre a OCR para PDFs escaneados.
+    """
     full_text = ""
     try:
+        # Tenta extrair texto de forma nativa (rápido)
         with fitz.open(stream=file_content, filetype="pdf") as doc:
             for page in doc:
                 full_text += page.get_text()
+
+        # Se o texto extraído for muito curto ou parecer ilegível, tente OCR
+        if len(full_text.strip()) < 50:
+            st.info("Texto nativo não encontrado. Tentando extração por OCR...")
+            try:
+                images = convert_from_bytes(file_content)
+                ocr_text = ""
+                for image in images:
+                    # 'por' para português. Certifique-se de que o pacote 'tesseract-ocr-por' está instalado.
+                    ocr_text += pytesseract.image_to_string(image, lang='por')
+                full_text = ocr_text
+            except Exception as e:
+                st.error(f"Erro durante a extração por OCR: {e}")
+                return ""
+
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
+        return ""
+    
     return full_text
+
 
 def parse_amount(amount_str: str) -> float:
     """Converte uma string de valor monetário para float."""
@@ -103,28 +132,31 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         prompt = f"""
         Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
         O texto a seguir é o conteúdo de um extrato em PDF. Identifique cada transação e retorne uma lista de objetos JSON.
-        Cada objeto deve ter EXATAMENTE as seguintes chaves: "date" (no formato "DD/MM/AAAA"), "description" (a descrição completa, com aspas duplas escapadas com \\ se necessário) e "amount" (o valor como um número, usando ponto como separador decimal, e negativo para saídas).
-        Ignore linhas de saldo, cabeçalhos ou qualquer outra informação que não seja uma transação.
+        Cada objeto deve ter EXATAMENTE as seguintes chaves: "date" (a data da transação no formato "DD/MM/AAAA"), "description" (a descrição completa da transação, com aspas duplas escapadas se necessário) e "amount" (o valor da transação como um número decimal, usando ponto como separador decimal. Valores de saída/débito devem ser negativos e valores de entrada/crédito devem ser positivos).
+        Ignore linhas de saldo, cabeçalhos, rodapés ou qualquer outra informação que não seja uma transação individual.
 
         Texto do extrato:
         ---
         {text}
         ---
 
-        Retorne APENAS a lista de objetos JSON, sem formatação markdown ou texto adicional. Exemplo de saída:
+        Retorne APENAS a lista de objetos JSON, sem formatação markdown (como ````json) ou qualquer texto adicional.
+        Exemplo de saída:
         [
-          {{"date": "30/06/2025", "description": "PIX TRANSF BRUNO C28/06", "amount": -1500.00}},
-          {{"date": "30/06/2025", "description": "SISPAG PIX H2 ESTACIONAMENTO...", "amount": 1500.00}}
+          {{"date": "30/06/2025", "description": "PIX ENVIADO PARA FULANO", "amount": -150.50}},
+          {{"date": "29/06/2025", "description": "SALARIO EMPRESA XYZ", "amount": 5000.00}}
         ]
         """
         
         response = model.generate_content(prompt)
         cleaned_response = response.text.strip()
+        
+        # Remove a formatação de código markdown se o Gemini a adicionar
         if cleaned_response.startswith("```json"):
             cleaned_response = cleaned_response[7:]
         if cleaned_response.endswith("```"):
             cleaned_response = cleaned_response[:-3]
-        
+
         transactions_json = json.loads(cleaned_response)
         
         transactions = []
@@ -168,6 +200,7 @@ def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dic
             transactions = parse_with_gemini(text, gemini_key)
 
     return transactions
+
 
 def categorize_transaction(description: str) -> str:
     """Categoriza uma transação com base em palavras-chave na descrição."""
@@ -219,6 +252,7 @@ if uploaded_files:
             all_transactions = []
             for uploaded_file in uploaded_files:
                 file_content = uploaded_file.getvalue()
+                # A função extract_text_from_pdf agora lida com PDFs nativos e escaneados
                 text = extract_text_from_pdf(file_content)
                 transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
                 all_transactions.extend(transactions)
@@ -287,9 +321,7 @@ if uploaded_files:
     df_for_editor['Valor (R$)'] = df_for_editor['amount'].map("{:,.2f}".format)
     df_for_editor.rename(columns={'description': 'Descrição', 'category': 'Categoria'}, inplace=True)
 
-    # Usamos um formulário para agrupar a seleção e o botão
     with st.form("selection_form"):
-        # O st.data_editor é usado para exibir e selecionar as linhas
         edited_df = st.data_editor(
             df_for_editor[['Data', 'Descrição', 'Valor (R$)', 'Categoria']],
             key="data_editor",
@@ -300,7 +332,6 @@ if uploaded_files:
         
         submitted = st.form_submit_button("Desconsiderar Transação(ões) Selecionada(s)")
         if submitted:
-            # Acessa a seleção do data_editor através do st.session_state
             if 'data_editor' in st.session_state and st.session_state.data_editor['selection']['rows']:
                 selected_indices = st.session_state.data_editor['selection']['rows']
                 selected_ids = df_processed.iloc[selected_indices]['id'].tolist()
