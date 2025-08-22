@@ -32,17 +32,23 @@ def extract_text_from_pdf(file_content: bytes) -> str:
             
             for page_num, page in enumerate(doc, 1):
                 page_text = page.get_text()
-                full_text += f"\n--- PÁGINA {page_num} ---\n{page_text}"
+                full_text += f"\n{page_text}"
                 
                 # Log para debug - mostra quantos caracteres foram extraídos de cada página
-                st.sidebar.debug(f"Página {page_num}: {len(page_text)} caracteres")
+                if len(page_text.strip()) > 0:
+                    st.sidebar.write(f"Página {page_num}: {len(page_text)} caracteres extraídos")
+                else:
+                    st.sidebar.warning(f"Página {page_num}: Nenhum texto extraído (pode ser um PDF escaneado)")
                 
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
         return ""
     
     # Log para debug - mostra o total de caracteres extraídos
-    st.sidebar.info(f"Total de texto extraído: {len(full_text)} caracteres")
+    if len(full_text.strip()) > 0:
+        st.sidebar.info(f"Total de texto extraído: {len(full_text)} caracteres")
+    else:
+        st.sidebar.error("Nenhum texto pôde ser extraído do PDF. Pode ser um PDF escaneado (imagem).")
     
     return full_text
 
@@ -76,10 +82,7 @@ def parse_itau(text: str) -> List[Dict[str, Any]]:
     """Parser robusto para extratos do Itaú que analisa linha por linha."""
     transactions = []
     
-    # Remove marcações de página para análise contínua
-    text_without_page_marks = re.sub(r'--- PÁGINA \d+ ---', '', text)
-    
-    lines = text_without_page_marks.split('\n')
+    lines = text.split('\n')
     
     for i, line in enumerate(lines):
         line = line.strip()
@@ -109,10 +112,7 @@ def parse_santander(text: str) -> List[Dict[str, Any]]:
     """Parser para extratos do Santander."""
     transactions = []
     
-    # Remove marcações de página para análise contínua
-    text_without_page_marks = re.sub(r'--- PÁGINA \d+ ---', '', text)
-    
-    lines = text_without_page_marks.split('\n')
+    lines = text.split('\n')
     
     # Padrão Santander: data, descrição e valor
     date_pattern = r'^\d{2}/\d{2}/\d{4}'
@@ -150,10 +150,7 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
     transactions = []
     current_date = None
     
-    # Remove marcações de página para análise contínua
-    text_without_page_marks = re.sub(r'--- PÁGINA \d+ ---', '', text)
-    
-    lines = text_without_page_marks.split('\n')
+    lines = text.split('\n')
     
     for line in lines:
         line = line.strip()
@@ -241,11 +238,8 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # Remove marcações de página para análise mais limpa
-        clean_text = re.sub(r'--- PÁGINA \d+ ---', '', text)
-        
         # Limita o texto para evitar exceder o limite de tokens
-        text_sample = clean_text[:8000] if len(clean_text) > 8000 else clean_text
+        text_sample = text[:8000] if len(text) > 8000 else text
         
         prompt = f"""
         Você é um especialista em análise de dados financeiros. Sua tarefa é extrair transações de um texto de extrato bancário.
@@ -258,7 +252,7 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         {text_sample}
         ---
 
-        Retorne APENAS a lista de objetos JSON, sem formatação markdown ou texto adicional. Exemplo de saída:
+        Retorne APENAS a lista de objetos JSON, sans formatação markdown ou texto adicional. Exemplo de saída:
         [
           {{"date": "30/06/2025", "description": "PIX TRANSF BRUNO C28/06", "amount": -1500.00}},
           {{"date": "30/06/2025", "description": "SISPAG PIX H2 ESTACIONAMENTO...", "amount": 1500.00}}
@@ -421,6 +415,14 @@ if uploaded_files:
                 
                 if not text or len(text.strip()) < 50:
                     st.error(f"O arquivo {uploaded_file.name} parece estar vazio ou não pôde ser lido corretamente.")
+                    # Tenta usar o Gemini mesmo com texto vazio (pode ser PDF escaneado)
+                    if gemini_api_key:
+                        st.sidebar.warning("Tentando usar Gemini para PDF possivelmente escaneado...")
+                        with st.spinner("A IA do Gemini está analisando o extrato escaneado..."):
+                            gemini_transactions = parse_with_gemini("Extrato bancário em PDF escaneado", gemini_api_key)
+                            if gemini_transactions:
+                                all_transactions.extend(gemini_transactions)
+                                st.sidebar.info(f"Gemini encontrou {len(gemini_transactions)} transações no PDF escaneado")
                     continue
                 
                 transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
