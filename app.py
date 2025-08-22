@@ -194,7 +194,7 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
     return transactions
 
 def safe_json_parse(json_str):
-    """Tenta analisar JSON de forma segura, mesmo com strings malformadas."""
+    """Tenta analisar JSON de forma segura, mesmo avec strings malformadas."""
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as e:
@@ -462,10 +462,17 @@ if uploaded_files:
         total_expenses = df_processed[df_processed['amount'] < 0]['amount'].sum()
         net_balance = total_income + total_expenses  # total_expenses já é negativo
         
-        # Calcula meses analisados
+        # CORREÇÃO: Calcula meses analisados de forma mais robusta
         if 'date' in df_processed.columns and not df_processed['date'].empty:
-            unique_months = df_processed['date'].dt.to_period('M').nunique()
+            # Extrai ano e mês de cada data
+            df_processed['ano_mes'] = df_processed['date'].dt.to_period('M')
+            # Conta meses únicos
+            unique_months = df_processed['ano_mes'].nunique()
             months_analyzed = max(unique_months, 1)  # Pelo menos 1 mês
+            
+            # Mostra informações de debug
+            st.sidebar.info(f"Meses encontrados: {sorted(df_processed['ano_mes'].unique().astype(str))}")
+            st.sidebar.info(f"Total de meses únicos: {unique_months}")
         else:
             months_analyzed = 1
             
@@ -511,12 +518,16 @@ if uploaded_files:
     
     st.subheader("Resumo Mensal")
     if not df_processed.empty and 'date' in df_processed.columns:
-        df_processed['Mês'] = df_processed['date'].dt.strftime('%Y-%m')
-        monthly_summary = df_processed.groupby('Mês').apply(lambda x: pd.Series({
+        # CORREÇÃO: Usa a coluna ano_mes já calculada
+        monthly_summary = df_processed.groupby('ano_mes').apply(lambda x: pd.Series({
             'Entradas': x[x['amount'] > 0]['amount'].sum(),
             'Saídas': x[x['amount'] < 0]['amount'].sum(),
             'Saldo': x['amount'].sum()
         })).reset_index()
+        
+        # Converte Period para string para exibição
+        monthly_summary['Mês'] = monthly_summary['ano_mes'].astype(str)
+        monthly_summary = monthly_summary[['Mês', 'Entradas', 'Saídas', 'Saldo']]
         
         # Formata os valores para exibição
         formatted_summary = monthly_summary.copy()
