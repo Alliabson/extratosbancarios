@@ -28,13 +28,12 @@ def extract_text_from_pdf(file_content: bytes) -> str:
             
             for page_num, page in enumerate(doc, 1):
                 page_text = page.get_text()
-                full_text += f"\n--- PAGE {page_num} ---\n{page_text}"
-                
-                if len(page_text.strip()) > 0:
+                if page_text.strip():
+                    full_text += f"\n--- PAGE {page_num} ---\n{page_text}"
                     st.sidebar.write(f"Página {page_num}: {len(page_text)} caracteres extraídos")
                 else:
                     st.sidebar.warning(f"Página {page_num}: Nenhum texto extraído (pode ser um PDF escaneado)")
-                    
+                    # Se não extrair texto, retorna uma string vazia para sinalizar o problema
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
         return ""
@@ -42,7 +41,7 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     if len(full_text.strip()) > 0:
         st.sidebar.info(f"Total de texto extraído: {len(full_text)} caracteres")
     else:
-        st.sidebar.error("Nenhum texto pôde ser extraído do PDF. Verifique se o arquivo não é uma imagem escaneada.")
+        st.sidebar.error("Nenhum texto pôde ser extraído do PDF. O arquivo será enviado para o Gemini como imagem.")
         
     return full_text
 
@@ -53,19 +52,17 @@ def parse_amount(amount_str: str) -> float:
     evitando a conversão de números de documento.
     """
     if not isinstance(amount_str, str) or ',' not in amount_str:
-        return 0.0 # Se não tiver vírgula, não é um valor monetário válido neste contexto.
+        return 0.0
 
     cleaned_str = amount_str.strip().replace("R$", "").strip()
     is_negative = '-' in cleaned_str or cleaned_str.endswith('-')
     cleaned_str = cleaned_str.replace('-', '')
     
-    # Remove pontos de milhar e substitui a vírgula decimal por ponto
     cleaned_str = cleaned_str.replace('.', '').replace(',', '.')
         
     try:
         value = float(cleaned_str)
-        # Uma verificação de sanidade final contra valores absurdos
-        if abs(value) > 100_000_000: # Ignora valores acima de 100 milhões
+        if abs(value) > 100_000_000:
             return 0.0
         return -value if is_negative else value
     except (ValueError, TypeError):
@@ -74,16 +71,13 @@ def parse_amount(amount_str: str) -> float:
 def parse_itau(text: str) -> List[Dict[str, Any]]:
     """Parser aprimorado para Itaú, focado em extrair o valor correto da coluna de transações."""
     transactions = []
-    # Regex mais específico: Procura data, depois descrição, e captura os dois últimos valores (valor da transação e saldo)
     pattern = re.compile(r'^(\d{2}/\d{2}/\d{4})\s+(.*?)\s+(-?[\d\.]*,\d{2})\s+(-?[\d\.]*,\d{2})?$', re.MULTILINE)
     
     for match in pattern.finditer(text):
         date_str, description, val1_str, val2_str = match.groups()
         
-        # O valor da transação é o primeiro capturado. val2_str é geralmente o saldo.
         amount_str = val1_str
         
-        # Ignora linhas de saldo
         if any(term in description.upper() for term in ['SALDO DO DIA', 'SALDO ANTERIOR']):
             continue
             
@@ -107,7 +101,6 @@ def parse_santander(text: str) -> List[Dict[str, Any]]:
     if year_match:
         current_year = year_match.group(1)
 
-    # Padrão para identificar uma linha que termina com um valor monetário claro
     transaction_line_pattern = re.compile(r'(-?[\d\.]*,\d{2}-?)$')
     date_pattern = re.compile(r'^\s*(\d{2}/\d{2})')
 
@@ -115,7 +108,6 @@ def parse_santander(text: str) -> List[Dict[str, Any]]:
         amount_match = transaction_line_pattern.search(line)
         date_match = date_pattern.search(line)
         
-        # Uma linha de transação deve ter tanto uma data no início quanto um valor no final
         if date_match and amount_match:
             date_str = date_match.group(1)
             amount_str = amount_match.group(1)
@@ -123,7 +115,6 @@ def parse_santander(text: str) -> List[Dict[str, Any]]:
             
             description = line.replace(date_str, "").replace(amount_str, "").strip()
             
-            # Junta com linhas anteriores se elas não forem transações
             full_description_parts = [description]
             prev_idx = i - 1
             while prev_idx >= 0:
@@ -165,10 +156,8 @@ def parse_inter(text: str) -> List[Dict[str, Any]]:
             continue
 
         if current_date:
-            # Captura descrição, valor da transação (com R$) e saldo (com R$)
             trans_match = re.search(r'^(.*?)\s+(-?R\$\s*[\d\.]*,\d{2})\s+(-?R\$\s*[\d\.]*,\d{2})', line)
             if not trans_match:
-                 # Captura descrição, valor da transação (sem R$) e saldo (com R$)
                  trans_match = re.search(r'^(.*?)\s+(-?[\d\.]*,\d{2})\s+(-?R\$\s*[\d\.]*,\d{2})', line)
 
             if trans_match:
@@ -199,7 +188,7 @@ def safe_json_parse(json_str: str):
         st.warning("Falha no parse JSON. O Gemini pode ter retornado um formato inesperado.")
         return []
 
-def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
+def parse_with_gemini(text: str, file_content: bytes, api_key: str) -> List[Dict[str, Any]]:
     """Usa a API do Gemini com um prompt mais específico para evitar erros."""
     if not api_key:
         st.error("A chave de API do Gemini não foi fornecida.")
@@ -207,34 +196,66 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        text_sample = text[:15000] if len(text) > 15000 else text
-        
-        prompt = f"""
-        Você é um especialista em análise de extratos bancários brasileiros. Sua tarefa é extrair transações de um texto de extrato.
-        Extraia cada transação e retorne uma lista de objetos JSON com as chaves "date" (DD/MM/AAAA), "description" e "amount" (float, negativo para saídas).
-        
-        CRÍTICO: Ignore qualquer sequência longa de números que seja claramente um código de barras, ID de documento ou CNPJ, e não um valor monetário. Valores monetários reais quase sempre terão uma vírgula e dois dígitos para os centavos.
-        
-        Texto do extrato:
-        ---
-        {text_sample}
-        ---
+        # Se não houver texto extraído, usa o modelo multimodal para processar a imagem do PDF
+        if not text.strip():
+            model_name = 'gemini-pro-vision'
+            model = genai.GenerativeModel(model_name)
+            
+            prompt_parts = [
+                "Você é um assistente de OCR. O usuário fará upload da imagem de um extrato bancário em português.",
+                "Leia o extrato e extraia todas as transações, incluindo data, descrição e valor.",
+                "Retorne os dados como uma lista de objetos JSON. Cada objeto deve ter as chaves 'date' (formato DD/MM/AAAA), 'description' (a descrição da transação) e 'amount' (o valor como um número com duas casas decimais, negativo para débitos).",
+                "Ignore saldos e quaisquer informações que não sejam transações.",
+            ]
+            
+            # Converte o PDF para imagens e envia para o Gemini
+            pages = []
+            with fitz.open(stream=file_content, filetype="pdf") as doc:
+                for page in doc:
+                    pix = page.get_pixmap()
+                    img_bytes = pix.tobytes("png")
+                    pages.append(img_bytes)
 
-        Retorne APENAS a lista de objetos JSON.
-        """
-        
-        start_time = time.time()
-        response = model.generate_content(prompt)
-        processing_time = time.time() - start_time
-        st.sidebar.info(f"Gemini processou em {processing_time:.1f} segundos")
+            full_response = ""
+            for img in pages:
+                image_parts = [
+                    {
+                        "mime_type": "image/png",
+                        "data": img
+                    }
+                ]
+                
+                response = model.generate_content(prompt_parts + image_parts)
+                full_response += response.text + "\n"
+                
+            transactions_json = safe_json_parse(full_response)
 
-        transactions_json = safe_json_parse(response.text)
-        
+        else:
+            # Caso contrário, usa o modelo de texto como fallback
+            model_name = 'gemini-1.5-flash'
+            model = genai.GenerativeModel(model_name)
+            
+            text_sample = text[:15000] if len(text) > 15000 else text
+            
+            prompt = f"""
+            Você é um especialista em análise de extratos bancários brasileiros. Sua tarefa é extrair transações de um texto de extrato.
+            Extraia cada transação e retorne uma lista de objetos JSON com as chaves "date" (DD/MM/AAAA), "description" e "amount" (float, negativo para saídas).
+            
+            CRÍTICO: Ignore qualquer sequência longa de números que seja claramente um código de barras, ID de documento ou CNPJ, e não um valor monetário. Valores monetários reais quase sempre terão uma vírgula e dois dígitos para os centavos.
+            
+            Texto do extrato:
+            ---
+            {text_sample}
+            ---
+
+            Retorne APENAS a lista de objetos JSON.
+            """
+            response = model.generate_content(prompt)
+            transactions_json = safe_json_parse(response.text)
+
         if not transactions_json:
             st.error("Não foi possível extrair transações da resposta do Gemini.")
-            st.sidebar.text_area("Resposta do Gemini (para depuração):", response.text, height=150)
             return []
             
         transactions = []
@@ -258,7 +279,7 @@ def parse_with_gemini(text: str, api_key: str) -> List[Dict[str, Any]]:
         return []
 
 
-def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dict[str, Any]]:
+def detect_bank_and_parse(text: str, file_content: bytes, filename: str, gemini_key: str) -> List[Dict[str, Any]]:
     """Detecta o banco, tenta o parser por regras e usa Gemini como fallback."""
     normalized_text = unicodedata.normalize('NFKD', text.lower()).encode('ascii', 'ignore').decode('utf-8')
     
@@ -278,7 +299,7 @@ def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dic
     st.sidebar.info(f"Arquivo '{filename}' identificado como: {bank_name}")
     
     transactions = []
-    if parser:
+    if parser and text.strip(): # Só tenta o parser de regras se houver texto
         try:
             transactions = parser(text)
             st.sidebar.info(f"Parser por regras encontrou {len(transactions)} transações.")
@@ -289,7 +310,7 @@ def detect_bank_and_parse(text: str, filename: str, gemini_key: str) -> List[Dic
     if not transactions and gemini_key:
         st.sidebar.warning(f"Nenhuma transação via regras. Usando Gemini AI para '{filename}'...")
         with st.spinner("A IA do Gemini está analisando o extrato..."):
-            gemini_transactions = parse_with_gemini(text, gemini_key)
+            gemini_transactions = parse_with_gemini(text, file_content, gemini_key)
             if gemini_transactions:
                 transactions = gemini_transactions
                 st.sidebar.info(f"Gemini encontrou {len(transactions)} transações.")
@@ -318,7 +339,7 @@ def categorize_transaction(description: str) -> str:
             return category
     return 'Outros'
 
-# --- INTERFACE DA APLICAÇÃO STREAMLIT (sem alterações) ---
+# --- INTERFACE DA APLICAÇÃO STREAMLIT ---
 if 'excluded_ids' not in st.session_state:
     st.session_state.excluded_ids = set()
 if 'processed_files' not in st.session_state:
@@ -342,11 +363,11 @@ if uploaded_files:
         with st.spinner("Processando arquivos..."):
             all_transactions = []
             for uploaded_file in uploaded_files:
-                text = extract_text_from_pdf(uploaded_file.getvalue())
-                if text:
-                    transactions = detect_bank_and_parse(text, uploaded_file.name, gemini_api_key)
-                    all_transactions.extend(transactions)
-                    st.sidebar.success(f"Processado {uploaded_file.name}: {len(transactions)} transações")
+                file_content = uploaded_file.getvalue()
+                text = extract_text_from_pdf(file_content)
+                transactions = detect_bank_and_parse(text, file_content, uploaded_file.name, gemini_api_key)
+                all_transactions.extend(transactions)
+                st.sidebar.success(f"Processado {uploaded_file.name}: {len(transactions)} transações")
             if not all_transactions:
                 st.error("Nenhuma transação pôde ser extraída.")
                 st.stop()
