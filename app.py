@@ -35,7 +35,6 @@ def extract_text_from_pdf(file_content: bytes) -> str:
 
 def safe_json_parse(json_str: str) -> List[Dict[str, Any]]:
     """Tenta analisar uma string JSON que pode estar mal formatada, limpando-a primeiro."""
-    # Procura pelo início '[' e o final ']' do array JSON na resposta da IA
     json_match = re.search(r'\[.*\]', json_str, re.DOTALL)
     if not json_match:
         st.warning("A resposta da IA não continha um formato de lista JSON válido.")
@@ -61,7 +60,6 @@ def extract_transactions_with_gemini(text: str, file_content: bytes, api_key: st
     try:
         genai.configure(api_key=api_key)
         
-        # Se não houver texto, trata o PDF como imagem (OCR)
         if not text.strip():
             model = genai.GenerativeModel('gemini-pro-vision')
             prompt = [
@@ -72,7 +70,6 @@ def extract_transactions_with_gemini(text: str, file_content: bytes, api_key: st
                 "Ignore saldos, cabeçalhos e qualquer informação que não seja uma transação financeira."
             ]
             
-            # Converte as páginas do PDF em imagens
             image_parts = []
             with fitz.open(stream=file_content, filetype="pdf") as doc:
                 for page in doc:
@@ -82,7 +79,6 @@ def extract_transactions_with_gemini(text: str, file_content: bytes, api_key: st
 
             response = model.generate_content(prompt + image_parts)
         
-        # Se houver texto, usa o modelo de linguagem
         else:
             model = genai.GenerativeModel('gemini-1.5-flash')
             prompt = f"""
@@ -100,20 +96,24 @@ def extract_transactions_with_gemini(text: str, file_content: bytes, api_key: st
             """
             response = model.generate_content(prompt)
 
-        # Processamento da resposta da IA
         transactions_json = safe_json_parse(response.text)
         if not transactions_json:
             return []
             
         processed_transactions = []
         for t in transactions_json:
+            # Ponto da correção: Verifica se 'amount' não é nulo ANTES de processar
+            amount_value = t.get('amount')
+            if amount_value is None:
+                st.warning(f"Transação da IA ignorada por ter valor nulo: {t}")
+                continue # Pula para a próxima transação
+
             try:
-                if all(k in t for k in ['date', 'description', 'amount']):
-                    processed_transactions.append({
-                        "date": pd.to_datetime(t['date'], format='%d/%m/%Y', errors='coerce'),
-                        "description": str(t.get('description', '')),
-                        "amount": float(t.get('amount', 0.0))
-                    })
+                processed_transactions.append({
+                    "date": pd.to_datetime(t.get('date'), format='%d/%m/%Y', errors='coerce'),
+                    "description": str(t.get('description', '')),
+                    "amount": float(amount_value)
+                })
             except (ValueError, KeyError, TypeError) as e:
                 st.warning(f"Transação da IA ignorada devido a formato inválido: {t} | Erro: {e}")
                 continue
