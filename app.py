@@ -38,11 +38,8 @@ def extract_text_from_pdf(file_content: bytes) -> str:
 def parse_amount(amount_str: str) -> float:
     """Converte valor monetário para float."""
     try:
-        # Remove R$, pontos e espaços
         cleaned = str(amount_str).replace('R$', '').replace('.', '').replace(' ', '')
-        # Substitui vírgula por ponto para decimal
         cleaned = cleaned.replace(',', '.')
-        # Verifica se é negativo
         is_negative = '-' in cleaned
         cleaned = cleaned.replace('-', '')
         
@@ -54,13 +51,11 @@ def parse_amount(amount_str: str) -> float:
 def parse_date(date_str: str) -> datetime:
     """Tenta parsear data em múltiplos formatos."""
     try:
-        # Primeiro tenta o formato mais comum DD/MM/AAAA
         try:
             return pd.to_datetime(date_str, format='%d/%m/%Y')
         except:
             pass
         
-        # Tenta outros formatos
         formats_to_try = [
             '%d-%m-%Y', '%d.%m.%Y', '%Y/%m/%d', '%d/%m/%y',
             '%d de %B de %Y', '%d de %b de %Y', '%B %Y', '%b %Y'
@@ -72,7 +67,6 @@ def parse_date(date_str: str) -> datetime:
             except:
                 continue
                 
-        # Última tentativa com parser flexível
         return pd.to_datetime(date_str, errors='coerce')
     except:
         return pd.NaT
@@ -104,7 +98,7 @@ def extract_transactions_with_gemini(text: str, api_key: str) -> list:
         ]
 
         TEXTO DO EXTRATO:
-        {text[:10000]}  # Limite para não exceder tokens
+        {text[:10000]}
 
         RETORNE APENAS O JSON, SEM TEXTOS ADICIONAIS.
         """
@@ -112,10 +106,8 @@ def extract_transactions_with_gemini(text: str, api_key: str) -> list:
         with st.spinner("🤖 IA analisando extrato..."):
             response = model.generate_content(prompt)
             
-        # Limpa a resposta
         response_text = response.text.strip()
         
-        # Remove marcações de código
         if response_text.startswith("```json"):
             response_text = response_text[7:]
         if response_text.endswith("```"):
@@ -123,10 +115,8 @@ def extract_transactions_with_gemini(text: str, api_key: str) -> list:
         if response_text.startswith("```"):
             response_text = response_text[3:]
         
-        # Parse do JSON
         transactions = json.loads(response_text)
         
-        # Processa as transações
         processed_transactions = []
         for transaction in transactions:
             try:
@@ -178,14 +168,11 @@ def categorize_transaction(description: str) -> str:
 
 # --- INTERFACE PRINCIPAL ---
 
-# Configuração inicial
 if 'transactions' not in st.session_state:
-    # CORREÇÃO: Inicializar como um DataFrame vazio do Pandas
     st.session_state.transactions = pd.DataFrame()
 if 'excluded_ids' not in st.session_state:
     st.session_state.excluded_ids = set()
 
-# Verificar chave API
 if "gemini_api_key" not in st.secrets:
     st.error("""
     ❌ Chave do Gemini AI não encontrada!
@@ -194,10 +181,9 @@ if "gemini_api_key" not in st.secrets:
     1. Acesse https://makersuite.google.com/
     2. Crie uma API key
     3. Adicione no secrets.toml: gemini_api_key = "sua-chave-aqui"
-    """)
+    """ )
     st.stop()
 
-# Sidebar
 with st.sidebar:
     st.header("⚙️ Controles")
     st.success("✅ Gemini AI configurado")
@@ -215,7 +201,6 @@ with st.sidebar:
         help="Digite seu nome para remover transferências internas"
     )
 
-# Processamento principal
 if uploaded_files:
     if st.button("🔄 Processar Extratos", type="primary"):
         with st.spinner("Processando arquivos..."):
@@ -224,14 +209,12 @@ if uploaded_files:
             for uploaded_file in uploaded_files:
                 st.sidebar.info(f"📂 Processando: {uploaded_file.name}")
                 
-                # Extrai texto do PDF
                 text = extract_text_from_pdf(uploaded_file.getvalue())
                 
                 if not text or len(text.strip()) < 100:
                     st.error(f"❌ Arquivo {uploaded_file.name} está vazio ou inválido")
                     continue
                 
-                # Extrai transações com Gemini AI
                 transactions = extract_transactions_with_gemini(
                     text, 
                     st.secrets["gemini_api_key"]
@@ -244,7 +227,6 @@ if uploaded_files:
                     st.sidebar.error(f"❌ {uploaded_file.name}: Nenhuma transação encontrada")
             
             if all_transactions:
-                # Cria DataFrame
                 df = pd.DataFrame(all_transactions)
                 df['category'] = df['description'].apply(categorize_transaction)
                 df = df.sort_values('date', ascending=False)
@@ -255,39 +237,31 @@ if uploaded_files:
                 st.session_state.excluded_ids = set()
                 st.success(f"✅ Análise concluída! {len(df)} transações encontradas.")
             else:
-                # Se não houver transações, garante que o session_state seja um DF vazio
                 st.session_state.transactions = pd.DataFrame()
                 st.error("❌ Nenhuma transação foi encontrada em nenhum arquivo.")
 
-# Exibir resultados se existirem transações
-# CORREÇÃO: Esta verificação agora funciona corretamente
 if not st.session_state.transactions.empty:
     df = st.session_state.transactions.copy()
     
-    # Aplicar filtro de nome se especificado
     if filter_name:
         mask = ~df['description'].str.contains(filter_name, case=False, na=False)
         df = df[mask]
         st.sidebar.info(f"👤 Filtrado: {filter_name}")
     
-    # Remover transações excluídas
     if st.session_state.excluded_ids:
         df = df[~df['id'].isin(st.session_state.excluded_ids)]
     
-    # Métricas principais
     st.header("📈 Análise Financeira")
     
     total_income = df[df['amount'] > 0]['amount'].sum()
     total_expenses = df[df['amount'] < 0]['amount'].sum()
-    net_balance = total_income + total_expenses  # expenses já são negativos
+    net_balance = total_income + total_expenses
     
-    # Cálculo de meses - método mais robusto
     if not df.empty and 'date' in df.columns:
         df['year_month'] = df['date'].dt.to_period('M')
         unique_months = df['year_month'].nunique()
         months_analyzed = max(unique_months, 1)
         
-        # Mostrar meses detectados
         months_list = sorted(df['year_month'].astype(str).unique())
         st.sidebar.info(f"📅 Meses detectados: {', '.join(months_list)}")
     else:
@@ -296,7 +270,6 @@ if not st.session_state.transactions.empty:
     average_income = total_income / months_analyzed if months_analyzed > 0 else 0
     capacity_30 = average_income * 0.3
     
-    # Layout de métricas
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Entradas", f"R$ {total_income:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
     col2.metric("💸 Saídas", f"R$ {abs(total_expenses):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
@@ -307,7 +280,6 @@ if not st.session_state.transactions.empty:
     col5.metric("📊 Média Mensal", f"R$ {average_income:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
     col6.metric("🎯 Capacidade 30%", f"R$ {capacity_30:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
     
-    # Análise por categoria
     st.subheader("🗂️ Análise por Categoria")
     
     col1, col2 = st.columns(2)
@@ -324,7 +296,6 @@ if not st.session_state.transactions.empty:
         for category, amount in income.items():
             st.write(f"{category}: R$ {amount:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
     
-    # Resumo mensal
     st.subheader("📅 Resumo Mensal")
     
     if not df.empty and 'year_month' in df.columns:
@@ -340,7 +311,6 @@ if not st.session_state.transactions.empty:
         monthly_summary['Mês'] = monthly_summary.index.astype(str)
         monthly_summary = monthly_summary[['Mês', 'Entradas', 'Saídas', 'Saldo']]
         
-        # Formatar valores
         for col in ['Entradas', 'Saídas', 'Saldo']:
             monthly_summary[col] = monthly_summary[col].apply(
                 lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
@@ -348,7 +318,6 @@ if not st.session_state.transactions.empty:
         
         st.dataframe(monthly_summary, use_container_width=True, hide_index=True)
     
-    # Todas as transações
     st.subheader("💳 Todas as Transações")
     
     df_display = df.copy()
@@ -367,7 +336,6 @@ if not st.session_state.transactions.empty:
         height=min(600, 35 * len(df_display) + 38)
     )
     
-    # Botão para exportar dados
     if st.button("📤 Exportar para Excel"):
         csv = df_display[['Data', 'Descrição', 'Valor', 'Categoria']].to_csv(index=False)
         st.download_button(
@@ -380,8 +348,6 @@ if not st.session_state.transactions.empty:
 else:
     st.info("📁 Faça o upload dos extratos PDF e clique em 'Processar Extratos'")
 
-# Mensagem de status
-# CORREÇÃO: Condição ajustada para ser mais precisa
 if uploaded_files and st.session_state.transactions.empty:
     st.warning("""
     ⚠️ Nenhuma transação foi encontrada. Isso pode acontecer por:
@@ -393,4 +359,3 @@ if uploaded_files and st.session_state.transactions.empty:
     
     **Solução:** Verifique se os PDFs contêm texto selecionável e tente novamente.
     """)
-```
